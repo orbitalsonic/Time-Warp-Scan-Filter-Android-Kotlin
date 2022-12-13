@@ -1,11 +1,16 @@
 package com.orbitalsonic.timewarpscanfilter
 
 import android.annotation.SuppressLint
+import android.app.Application
+import android.content.ContentValues
 import android.graphics.*
 import android.media.Image
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.provider.MediaStore
+import android.util.Log
 import android.util.Size
 import android.view.TextureView
 import android.view.View
@@ -20,9 +25,11 @@ import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import com.google.common.util.concurrent.ListenableFuture
 import com.orbitalsonic.timewarpscanfilter.databinding.ActivityMainBinding
+import kotlinx.coroutines.*
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.io.OutputStream
 import java.util.*
 import java.util.concurrent.ExecutionException
 
@@ -69,6 +76,10 @@ class MainActivity : AppCompatActivity(), CameraXConfig.Provider {
         VERTICAL, HORIZONTAL
     }
 
+    private val handler = CoroutineExceptionHandler { _, exception ->
+        Log.e("DownloadTAG", "$exception")
+    }
+
     public override fun onCreate(bundle: Bundle?) {
         super.onCreate(bundle)
         binding = ActivityMainBinding.inflate(layoutInflater)
@@ -91,7 +102,7 @@ class MainActivity : AppCompatActivity(), CameraXConfig.Provider {
         }
 
         binding.btnSave.setOnClickListener {
-
+            saveBitmapInGalary(resultBitmap)
         }
         binding.btnCancel.setOnClickListener { view ->
             resultCancel()
@@ -275,25 +286,67 @@ class MainActivity : AppCompatActivity(), CameraXConfig.Provider {
         binding.resultImageView.setImageBitmap(resultBitmap)
     }
 
-    private fun saveBitmapInGalary(bitmap: Bitmap?): Uri {
-        val file =
-            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES).toString()
-        val file2 = File("$file/time_warp")
-        file2.mkdirs()
-        val nextInt = Random().nextInt(10000)
-        val file3 = File(file2, "Image-$nextInt.jpg")
-        if (file3.exists()) {
-            file3.delete()
+    fun saveBitmapInGalary(bitmap: Bitmap?) {
+        GlobalScope.launch(Dispatchers.Main + handler) {
+            async(Dispatchers.IO + handler) {
+                try {
+                    //Generating a file name
+                    val filename = "time_warp${System.currentTimeMillis()}.jpg"
+
+                    //Output stream
+                    var fos: OutputStream? = null
+
+                    //For devices running android >= Q
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        //getting the contentResolver
+                        contentResolver?.also { resolver ->
+
+                            //Content resolver will process the contentvalues
+                            val contentValues = ContentValues().apply {
+
+                                //putting file information in content values
+                                put(MediaStore.MediaColumns.DISPLAY_NAME, filename)
+                                put(MediaStore.MediaColumns.MIME_TYPE, "image/jpg")
+                                put(
+                                    MediaStore.MediaColumns.RELATIVE_PATH,
+                                    Environment.DIRECTORY_PICTURES
+                                )
+                            }
+
+                            //Inserting the contentValues to contentResolver and getting the Uri
+                            val imageUri: Uri? =
+                                resolver.insert(
+                                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                                    contentValues
+                                )
+
+                            //Opening an outputstream with the Uri that we got
+                            fos = imageUri?.let { resolver.openOutputStream(it) }
+                        }
+                    } else {
+                        //These for devices running on android < Q
+                        //So I don't think an explanation is needed here
+                        val imagesDir =
+                            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
+                        val image = File(imagesDir, filename)
+                        fos = FileOutputStream(image)
+                    }
+
+                    fos?.use {
+                        //Finally writing the bitmap to the output stream that we opened
+                        bitmap?.compress(Bitmap.CompressFormat.JPEG, 100, it)
+
+                    }
+                } catch (e: Exception) {
+                    runOnUiThread {
+                        showMessage("Ohh no! something happened")
+                    }
+                }
+            }.await()
+            runOnUiThread {
+                showMessage("Download Successfully!")
+            }
         }
-        try {
-            val fileOutputStream = FileOutputStream(file3)
-            bitmap!!.compress(Bitmap.CompressFormat.JPEG, 90, fileOutputStream)
-            fileOutputStream.flush()
-            fileOutputStream.close()
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
-        return Uri.fromFile(file3)
     }
 
     private fun startCapture(warp_direction: WARP_DIRECTION) {
@@ -447,6 +500,10 @@ class MainActivity : AppCompatActivity(), CameraXConfig.Provider {
             binding.previewViewImageView.setImageBitmap(bitmap)
             imageProxy.close()
         }
+    }
+
+    private fun showMessage(message:String){
+        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
     }
 
     fun stopCapture() {
